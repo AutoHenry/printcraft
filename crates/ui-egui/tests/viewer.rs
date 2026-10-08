@@ -1,5 +1,5 @@
 //! Viewer conveniences: close all, revert, fit height, view history, select all, find options,
-//! cover page.
+//! cover page, a scroll position per tab.
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -394,4 +394,80 @@ fn optimizer_audits_space_usage() {
     h.get_by_label("OK").click();
     h.run_steps(2);
     assert_eq!(h.state().dialog, Some(Dialog::Optimize), "back to the optimizer");
+}
+
+#[test]
+fn each_document_keeps_its_own_scroll_position() {
+    // #189: every document's page view shared one scroll position, so switching tabs showed a
+    // document at wherever the other one had been scrolled to (usually back at the top).
+    use pdfcraft_ui_egui::canvas::Fit;
+    let mut h = harness();
+    for v in &mut h.state_mut().views {
+        v.fit = Fit::Width;
+    }
+    let show = |h: &mut Harness<'static, PdfCraftApp>, i: usize| {
+        h.state_mut().active = Some(i);
+        h.run_steps(4);
+        h.state().views[i].current
+    };
+    show(&mut h, 0);
+    h.state_mut().views[0].goto = Some((3, 0.0));
+    h.run_steps(4);
+    assert_eq!(h.state().views[0].current, 3, "a.pdf scrolled to page 4");
+    // b.pdf opens where it was (the top), and is scrolled to its own last page.
+    assert_eq!(show(&mut h, 1), 0);
+    h.state_mut().views[1].goto = Some((1, 0.0));
+    h.run_steps(4);
+    assert_eq!(h.state().views[1].current, 1);
+    // Back to a.pdf: still on page 4, and b.pdf still on page 2.
+    assert_eq!(show(&mut h, 0), 3);
+    assert_eq!(show(&mut h, 1), 1);
+}
+
+#[test]
+fn arrow_and_page_keys_move_through_a_scrolling_document() {
+    // #185: in the continuous (default) and two-page views the arrow keys and Page Down / Up did
+    // nothing without ⌘.
+    use egui::Key;
+    use pdfcraft_ui_egui::canvas::{Fit, PageLayout};
+    let mut h = harness();
+    h.state_mut().active = Some(0);
+    h.state_mut().views[0].fit = Fit::Width;
+    h.run_steps(4);
+    assert_eq!(h.state().views[0].layout, PageLayout::Continuous);
+    let press = |h: &mut Harness<'static, PdfCraftApp>, key, times: usize| {
+        for _ in 0..times {
+            h.key_press(key);
+            h.run_steps(2);
+        }
+        h.run_steps(2);
+        h.state().views[0].current
+    };
+    // → / ← turn pages, as in Acrobat
+    assert_eq!(press(&mut h, Key::ArrowRight, 2), 2);
+    assert_eq!(press(&mut h, Key::ArrowLeft, 1), 1);
+    assert_eq!(press(&mut h, Key::ArrowLeft, 1), 0);
+    // ↓ scrolls a line at a time, Page Down a screen: count the presses that reach page 2
+    let presses = |h: &mut Harness<'static, PdfCraftApp>, key| {
+        let mut n = 0;
+        while h.state().views[0].current == 0 {
+            press(h, key, 1);
+            n += 1;
+            assert!(n < 500, "{key:?} never reached page 2");
+        }
+        n
+    };
+    let lines = presses(&mut h, Key::ArrowDown);
+    assert_eq!(press(&mut h, Key::ArrowUp, lines + 1), 0);
+    let screens = presses(&mut h, Key::PageDown);
+    assert_eq!(press(&mut h, Key::PageUp, screens + 1), 0);
+    assert!(screens >= 2 && lines > 2 * screens, "a fit-width page: {lines} lines, {screens} screens");
+    // two-page view: → moves a spread
+    h.state_mut().views[0].layout = PageLayout::TwoUp;
+    h.run_steps(4);
+    assert_eq!(press(&mut h, Key::ArrowRight, 1), 2);
+    // single-page view keeps Page Down for the next page
+    h.state_mut().views[0].layout = PageLayout::Single;
+    h.run_steps(4);
+    assert_eq!(press(&mut h, Key::PageDown, 1), 3);
 }
