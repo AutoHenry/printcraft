@@ -597,6 +597,7 @@
 	Bottom:	Снизу:
 	Width:	Ширина:
 	Height:	Высота:
+	Rotation:	Поворот:
 	Points from the page's bottom-left corner.	Точки от левого нижнего угла страницы.
 	Alignment:	Выравнивание:
 	Default Value:	Значение по умолчанию:
@@ -915,6 +916,7 @@
 	This comment's appearance can't be changed yet.	Внешний вид этого комментария пока нельзя изменить.
 	Icon	Значок
 	Thickness	Толщина
+	Line ending	Окончание линии
 	Modified	Изменено
 	No status has been set.	Статус не установлен.
 	Compare Files	Сравнить файлы
