@@ -48,6 +48,8 @@ mod tests;
 #[cfg(test)]
 mod tests_appearances;
 #[cfg(test)]
+mod tests_extract;
+#[cfg(test)]
 mod tests_failclosed;
 #[cfg(test)]
 mod tests_interp;

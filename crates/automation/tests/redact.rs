@@ -153,3 +153,67 @@ fn sanitizing_is_not_saved_over_the_source_without_consent_either() {
     assert_eq!(std::fs::read(dir.join("memo.pdf")).unwrap(), original);
     ok(&mut a, "doc_save", json!({ "doc": doc, "path": "memo-clean.pdf" }));
 }
+
+/// A two-page PDF: page 1 a line of text, page 2 a full-page JPEG "scan" of `jpeg`.
+fn scanned_pdf(jpeg: &[u8]) -> Vec<u8> {
+    let content2 = b"q 300 0 0 300 0 0 cm /Im0 Do Q";
+    let content1 = b"BT /F1 12 Tf 20 260 Td (Page one) Tj ET";
+    let objs: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 300 300] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 5 0 R /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /Contents 6 0 R /Resources << /XObject << /Im0 7 0 R >> >> >>".to_vec(),
+        [format!("<< /Length {} >>\nstream\n", content1.len()).as_bytes(), content1, b"\nendstream"].concat(),
+        [format!("<< /Length {} >>\nstream\n", content2.len()).as_bytes(), content2, b"\nendstream"].concat(),
+        [
+            format!("<< /Type /XObject /Subtype /Image /Width 64 /Height 64 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n", jpeg.len()).as_bytes(),
+            jpeg,
+            b"\nendstream",
+        ]
+        .concat(),
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offs = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offs.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        out.extend_from_slice(o);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let x = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offs {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+#[test]
+fn a_partly_redacted_jpeg_scan_is_not_in_the_saved_file() {
+    // #389, the reporter's script on a synthetic scan: mark part of a JPEG page, apply, sanitize,
+    // save in full, then look for the scan in the output the way `pdfimages -j` would. PdfCraft
+    // can't clear JPEG pixels, so the image goes whole; it must go from the file, not only from
+    // the page's content stream.
+    let dir = workdir("jpeg-scan");
+    let pixels: Vec<u8> = (0..64u32 * 64).map(|i| ((i * 37 + i / 64 * 11) % 251) as u8).collect();
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90).encode(&pixels, 64, 64, image::ExtendedColorType::L8).unwrap();
+    std::fs::write(dir.join("in.pdf"), scanned_pdf(&jpeg)).unwrap();
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "in.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut a, "page_images", json!({ "doc": doc, "page": 2 }))["count"], 1);
+    ok(&mut a, "redact_mark", json!({ "doc": doc, "page": 2, "rect": [30, 30, 150, 60] }));
+    let r = ok(&mut a, "redact_apply", json!({ "doc": doc }));
+    assert_eq!((r["status"].as_str(), r["report"]["images_removed"].as_u64()), (Some("complete"), Some(1)), "{r}");
+    ok(&mut a, "doc_remove_hidden", json!({ "doc": doc }));
+    let s = ok(&mut a, "doc_save", json!({ "doc": doc, "path": "out.pdf", "full": true }));
+    assert_eq!(s["incremental"], false, "{s}");
+    let saved = std::fs::read(dir.join("out.pdf")).unwrap();
+    // The JPEG's entropy-coded data (past its headers) is what an extractor writes out.
+    let middle = jpeg.get(jpeg.len() / 2..jpeg.len() / 2 + 32).unwrap();
+    assert!(!saved.windows(middle.len()).any(|w| w == middle), "the scan's JPEG data is not in the saved file");
+    let again = ok(&mut a, "doc_open", json!({ "path": "out.pdf" }))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut a, "page_images", json!({ "doc": again, "page": 2 }))["count"], 0, "the reopened page has no image left");
+    assert!(texts(&mut a, again)[0].contains("Page one"), "the unmarked page is untouched");
+}
